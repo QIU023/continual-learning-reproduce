@@ -7,7 +7,7 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from models.base import BaseLearner
 from utils.inc_net import ModifiedIncrementalNet
-from utils.toolkit import accuracy, tensor2numpy, target2onehot
+from utils.toolkit import tensor2numpy, target2onehot
 
 EPSILON = 1e-8
 
@@ -30,26 +30,10 @@ class UCIR(BaseLearner):
         self._device = args['device']
         self._class_means = None
 
-    def save_checkpoint(self):
-        self._network.cpu()
-        save_dict = {
-            'tasks': self._cur_task,
-            'model_state_dict': self._network.state_dict(),
-            'data_memory': self._data_memory,
-            'targets_memory': self._targets_memory,
-        }
-        torch.save(save_dict, 'dict_{}.pkl'.format(self._cur_task))
-
     def after_task(self):
         # self.save_checkpoint()
         self._old_network = self._network.copy().freeze()
         self._known_classes = self._total_classes
-
-    def eval_task(self):
-        y_pred, y_true = self._eval_ncm(self.test_loader, self._class_means)
-        accy = accuracy(y_pred, y_true, self._known_classes)
-
-        return accy
 
     def incremental_train(self, data_manager):
         self._cur_task += 1
@@ -109,6 +93,7 @@ class UCIR(BaseLearner):
             ce_losses = 0.
             lf_losses = 0.
             is_losses = 0.
+            correct, total = 0, 0
             for i, (_, inputs, targets) in enumerate(train_loader):
                 inputs, targets = inputs.to(self._device), targets.to(self._device)
                 logits = self._network(inputs)  # Final outputs after scaling  (bs, nb_classes)
@@ -151,10 +136,16 @@ class UCIR(BaseLearner):
                 lf_losses += lf_loss.item() if self._cur_task != 0 else lf_loss
                 is_losses += is_loss.item() if self._cur_task != 0 and len(old_classes_mask) != 0 else is_loss
 
+                # acc
+                _, preds = torch.max(logits, dim=1)
+                correct += preds.eq(targets.expand_as(preds)).cpu().sum()
+                total += len(targets)
+
             scheduler.step()
-            train_acc = self._compute_accuracy(self._network, train_loader)
+            # train_acc = self._compute_accuracy(self._network, train_loader)
+            train_acc = np.around(tensor2numpy(correct)*100 / total, decimals=2)
             test_acc = self._compute_accuracy(self._network, test_loader)
             info1 = 'Task {}, Epoch {}/{} => '.format(self._cur_task, epoch, epochs)
-            info2 = 'CE_loss {:.3f}, LF_loss {:.3f}, IS_loss {:.3f}, Train_accy {:.3f}, Test_accy {:.3f}'.format(
+            info2 = 'CE_loss {:.3f}, LF_loss {:.3f}, IS_loss {:.3f}, Train_accy {:.2f}, Test_accy {:.2f}'.format(
                 ce_losses/(i+1), lf_losses/(i+1), is_losses/(i+1), train_acc, test_acc)
             logging.info(info1 + info2)

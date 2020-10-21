@@ -3,11 +3,12 @@ import numpy as np
 from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
-from utils.data import iCIFAR10, iCIFAR100
+from utils.data import iCIFAR10, iCIFAR100, iImageNet1000
 
 
 class DataManager(object):
     def __init__(self, dataset_name, shuffle, seed, init_cls, increment):
+        self.dataset_name = dataset_name
         self._setup_data(dataset_name, shuffle, seed)
         assert init_cls <= len(self._class_order), 'No enough classes.'
         self._increments = [init_cls]
@@ -44,20 +45,20 @@ class DataManager(object):
         data, targets = [], []
         for idx in indices:
             class_data, class_targets = self._select(x, y, low_range=idx, high_range=idx+1)
-            data = data + class_data
+            data.append(class_data)
             targets.append(class_targets)
 
         if appendent is not None:
             appendent_data, appendent_targets = appendent
-            data = data + appendent_data if len(data) != 0 else appendent_data
+            data.append(appendent_data)
             targets.append(appendent_targets)
 
-        targets = np.concatenate(targets)
+        data, targets = np.concatenate(data), np.concatenate(targets)
 
         if ret_data:
-            return data, targets, DummyDataset(data, targets, trsf)
+            return data, targets, DummyDataset(data, targets, trsf, self.use_path)
         else:
-            return DummyDataset(data, targets, trsf)
+            return DummyDataset(data, targets, trsf, self.use_path)
 
     def _setup_data(self, dataset_name, shuffle, seed):
         idata = _get_idata(dataset_name)
@@ -66,6 +67,7 @@ class DataManager(object):
         # Data
         self._train_data, self._train_targets = idata.train_data, idata.train_targets
         self._test_data, self._test_targets = idata.test_data, idata.test_targets
+        self.use_path = idata.use_path
 
         # Transforms
         self._train_trsf = idata.train_trsf
@@ -88,23 +90,25 @@ class DataManager(object):
 
     def _select(self, x, y, low_range, high_range):
         idxes = np.where(np.logical_and(y >= low_range, y < high_range))[0]
-        ret_x = [x[i] for i in idxes]
-        ret_y = y[idxes]
-        return ret_x, ret_y
+        return x[idxes], y[idxes]
 
 
 class DummyDataset(Dataset):
-    def __init__(self, images, labels, trsf):
+    def __init__(self, images, labels, trsf, use_path=False):
         assert len(images) == len(labels), 'Data size error!'
         self.images = images
         self.labels = labels
         self.trsf = trsf
+        self.use_path = use_path
 
     def __len__(self):
         return len(self.images)
 
     def __getitem__(self, idx):
-        image = self.trsf(Image.fromarray(np.array(self.images[idx]).astype(np.uint8)))
+        if self.use_path:
+            image = self.trsf(pil_loader(self.images[idx]))
+        else:
+            image = self.trsf(Image.fromarray(self.images[idx]))
         label = self.labels[idx]
 
         return idx, image, label
@@ -120,5 +124,45 @@ def _get_idata(dataset_name):
         return iCIFAR10()
     elif name == 'cifar100':
         return iCIFAR100()
+    elif name == 'imagenet1000':
+        return iImageNet1000()
     else:
         raise NotImplementedError('Unknown dataset {}.'.format(dataset_name))
+
+
+def pil_loader(path):
+    '''
+    Ref:
+    https://pytorch.org/docs/stable/_modules/torchvision/datasets/folder.html#ImageFolder
+    '''
+    # open path as file to avoid ResourceWarning (https://github.com/python-pillow/Pillow/issues/835)
+    with open(path, 'rb') as f:
+        img = Image.open(f)
+        return img.convert('RGB')
+
+
+def accimage_loader(path):
+    '''
+    Ref:
+    https://pytorch.org/docs/stable/_modules/torchvision/datasets/folder.html#ImageFolder
+    accimage is an accelerated Image loader and preprocessor leveraging Intel IPP.
+    accimage is available on conda-forge.
+    '''
+    import accimage
+    try:
+        return accimage.Image(path)
+    except IOError:
+        # Potentially a decoding problem, fall back to PIL.Image
+        return pil_loader(path)
+
+
+def default_loader(path):
+    '''
+    Ref:
+    https://pytorch.org/docs/stable/_modules/torchvision/datasets/folder.html#ImageFolder
+    '''
+    from torchvision import get_image_backend
+    if get_image_backend() == 'accimage':
+        return accimage_loader(path)
+    else:
+        return pil_loader(path)

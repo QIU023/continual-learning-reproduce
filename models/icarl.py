@@ -7,9 +7,19 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from models.base import BaseLearner
 from utils.inc_net import IncrementalNet
-from utils.toolkit import target2onehot, accuracy
+from utils.toolkit import target2onehot, tensor2numpy
 
 EPSILON = 1e-8
+
+# ImageNet1000, ResNet18
+'''
+epochs = 60
+lrate = 2.0
+milestones = [20, 30, 40, 50]
+lrate_decay = 0.2
+batch_size = 128
+memory_size = 20000
+'''
 
 # CIFAR100, ResNet32
 epochs = 70
@@ -31,12 +41,6 @@ class iCaRL(BaseLearner):
         self._old_network = self._network.copy().freeze()
         self._known_classes = self._total_classes
 
-    def eval_task(self):
-        y_pred, y_true = self._eval_ncm(self.test_loader, self._class_means)
-        accy = accuracy(y_pred, y_true, self._known_classes)
-
-        return accy
-
     def incremental_train(self, data_manager):
         self._cur_task += 1
         self._total_classes = self._known_classes + data_manager.get_task_size(self._cur_task)
@@ -57,6 +61,8 @@ class iCaRL(BaseLearner):
 
     def _train(self, train_loader, test_loader):
         self._network.to(self._device)
+        if self._old_network is not None:
+            self._old_network.to(self._device)
         optimizer = optim.SGD(self._network.parameters(), lr=lrate, momentum=0.9, weight_decay=1e-5)
         scheduler = optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=lrate_decay)
         self._update_representation(train_loader, test_loader, optimizer, scheduler)
@@ -66,6 +72,7 @@ class iCaRL(BaseLearner):
         for _, epoch in enumerate(prog_bar):
             self._network.train()
             losses = 0.
+            correct, total = 0, 0
             for i, (_, inputs, targets) in enumerate(train_loader):
                 inputs, targets = inputs.to(self._device), targets.to(self._device)
                 logits = self._network(inputs)
@@ -84,10 +91,16 @@ class iCaRL(BaseLearner):
                 optimizer.step()
                 losses += loss.item()
 
+                # acc
+                _, preds = torch.max(logits, dim=1)
+                correct += preds.eq(targets.expand_as(preds)).cpu().sum()
+                total += len(targets)
+
             scheduler.step()
-            train_acc = self._compute_accuracy(self._network, train_loader)
+            # train_acc = self._compute_accuracy(self._network, train_loader)
+            train_acc = np.around(tensor2numpy(correct)*100 / total, decimals=2)
             test_acc = self._compute_accuracy(self._network, test_loader)
-            info = 'Task {}, Epoch {}/{} => Loss {:.3f}, Train_accy {:.3f}, Test_accy {:.3f}'.format(
+            info = 'Task {}, Epoch {}/{} => Loss {:.3f}, Train_accy {:.2f}, Test_accy {:.2f}'.format(
                 self._cur_task, epoch+1, epochs, losses/len(train_loader), train_acc, test_acc)
             prog_bar.set_description(info)
 
